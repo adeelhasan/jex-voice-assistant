@@ -1,0 +1,87 @@
+{
+  "name": "JEX - Read Emails",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "read-emails",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "webhookId": "jex-read-emails"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": "={{ $json.body.count || 5 }}",
+        "simple": false,
+        "options": {
+          "labelIds": "={{ $json.body.filter === 'unread' ? ['UNREAD'] : ['INBOX'] }}",
+          "format": "full"
+        }
+      },
+      "id": "gmail-node",
+      "name": "Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [450, 300],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_GMAIL_CREDENTIAL_ID",
+          "name": "Gmail OAuth2 account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the emails from Gmail node\nconst emails = $input.all();\n\n// Format emails for our application\nconst formattedEmails = emails.map(email => {\n  const data = email.json;\n  const payload = data.payload || {};\n  const headers = payload.headers || [];\n  \n  // Extract headers\n  const getHeader = (name) => {\n    const header = headers.find(h => h.name.toLowerCase() === name.toLowerCase());\n    return header ? header.value : '';\n  };\n  \n  return {\n    id: data.id,\n    from: getHeader('From'),\n    subject: getHeader('Subject'),\n    snippet: data.snippet || '',\n    date: getHeader('Date'),\n    threadId: data.threadId\n  };\n});\n\n// Create speech summary\nconst count = formattedEmails.length;\nlet speech = '';\n\nif (count === 0) {\n  speech = \"You have no emails matching that filter.\";\n} else {\n  speech = `You have ${count} email${count > 1 ? 's' : ''}. `;\n  \n  if (count > 0) {\n    const first = formattedEmails[0];\n    const fromName = first.from.split('<')[0].trim().replace(/\"/g, '');\n    speech += `The first is from ${fromName}, subject: \"${first.subject}\".`;\n  }\n  \n  if (count > 1) {\n    speech += ` You have ${count - 1} more.`;\n  }\n}\n\n// Return the formatted response\nreturn [{\n  json: {\n    speech: speech,\n    artifact: {\n      type: \"email_list\",\n      data: formattedEmails\n    }\n  }\n}];"
+      },
+      "id": "code-node",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 300]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Gmail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail": {
+      "main": [
+        [
+          {
+            "node": "Format Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2024-12-16T00:00:00.000Z",
+  "versionId": "1"
+}

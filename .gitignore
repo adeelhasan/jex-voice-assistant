@@ -1,0 +1,43 @@
+# Environment files
+.env
+.env.local
+.env*.local
+
+# Python
+agent/venv/
+agent/__pycache__/
+agent/*.pyc
+agent/*.pyo
+agent/*.pyd
+agent/.Python
+agent/pip-log.txt
+
+# Context Storage
+agent/context.db
+agent/context.db-journal
+
+# Node
+webapp/node_modules/
+webapp/.next/
+webapp/out/
+webapp/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Claude
+.claude/
