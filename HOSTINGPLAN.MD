@@ -1,582 +1,146 @@
-# JEX Hosting & Deployment Plan
+# JEX Hosting & Distribution Plan
 
-## Overview
+## 1. Core Goal: The Private "JEX Appliance"
 
-This document outlines the strategy for making JEX easily distributable and self-hostable, including hardware requirements, hosting options, and deployment tiers.
+The primary goal is to package the entire JEX application into a secure, private, single-tenant "appliance." This package should be easy for a user to deploy on a single server, giving them total control and privacy over their data and conversations.
 
----
-
-## Goal: Fully Self-Contained Docker Setup
-
-Package JEX into a Docker container with:
-- n8n instance (workflow automation)
-- Open source LLM (local inference)
-- LiveKit server (optional, for full air-gap)
-- Python agent
-- Next.js frontend
-
-**Target:** One-command deployment that runs entirely self-hosted.
+Our philosophy is **privacy-first**, achieved through self-hosting and a security-conscious architecture.
 
 ---
 
-## Feasibility Assessment
+## 2. Recommended Architecture: Docker Compose
 
-### ✅ Highly Feasible Components
+To achieve this, we will use **Docker Compose**. This is the industry-standard tool for running multi-container applications on a single host machine. It allows us to define all the services JEX needs in one file and manage them with a single command.
 
-**1. n8n Instance - Very Easy**
-- Official Docker image: `n8nio/n8n`
-- Can run entirely self-hosted
-- All workflows and credentials can be bundled
-- Zero external dependencies needed
+This approach is vastly superior to building a single, monolithic Docker image, as it provides isolation, better resource management, and easier maintenance.
 
-**2. Open Source LLM - Feasible with Trade-offs**
-- **Best Options:**
-  - Ollama (easiest) - Llama 3.1, Mistral, etc.
-  - LocalAI - OpenAI-compatible API
-  - Text-generation-webui (Oobabooga)
-- **Reality Check:**
-  - Requires 8-16GB RAM for decent models
-  - CPU inference is slow (5-10s); GPU highly recommended (1-2s)
-  - Quality gap vs GPT-4o-mini (but improving rapidly)
-  - Llama 3.1 8B or Mistral 7B are reasonable compromises
+The application will be composed of the following services running in separate containers:
 
-**3. Python Agent - Very Easy**
-- Already containerizable
-- Config.py already supports Ollama
-- Minimal changes needed
+*   **`jex-webapp`**: The Next.js user interface.
+*   **`jex-agent`**: The core Python agent.
+*   **`n8n`**: The workflow automation engine.
+*   **`ollama`**: For running the self-hosted LLM.
+*   **`livekit`**: The real-time voice server.
+*   **`redis`**: A required dependency for the LiveKit server.
 
-**4. Next.js Frontend - Very Easy**
-- Standard Node.js container
-- Minimal dependencies
-
-### ⚠️ Challenging Components
-
-**LiveKit Server - Feasible but Complex**
-- Open source with official Docker images
-- **Challenges:**
-  - TURN/STUN requirements for WebRTC across networks
-  - Needs public IP or properly configured NAT
-  - SSL certificates required for WebRTC in browsers
-  - Resource intensive for real-time media processing
-  - Complex networking (port forwarding, firewall rules)
-- **Recommendation:** Make optional; users can choose cloud or self-hosted
-
-**Speech-to-Text (STT)**
-- Deepgram requires API (not self-hostable)
-- **Alternatives:**
-  - Whisper.cpp (OpenAI's Whisper running locally)
-  - Vosk (lightweight, offline)
-  - Coqui STT (open source)
-- **Trade-off:** Slower, less accurate than Deepgram
-
-**Text-to-Speech (TTS)**
-- OpenAI TTS requires API
-- **Alternatives:**
-  - Coqui TTS (open source, decent quality)
-  - Piper TTS (fast, lightweight)
-  - XTTS (very good quality but slow)
-- **Trade-off:** Voice quality not as natural
-
----
-
-## Hardware Requirements
-
-### Minimum Specs (Hybrid - Cloud APIs)
-```
-CPU:     2 cores
-RAM:     4GB
-Storage: 20GB
-Network: Decent bandwidth for voice streaming
-
-What runs locally:
-- n8n: ~500MB RAM
-- Python agent: ~500MB RAM
-- Next.js: ~300MB RAM
-- PostgreSQL: ~200MB RAM
-Total: ~1.5GB + system overhead
-
-Note: LLM/STT/TTS still use cloud APIs
-```
-
-### Realistic Specs (Local LLM - Small Models)
-```
-CPU:     4 cores minimum
-RAM:     8-12GB (for Llama 3.1 8B or Mistral 7B)
-Storage: 40GB SSD (model files are 4-7GB each)
-GPU:     None required but VERY helpful
-
-Breakdown:
-- Ollama + Llama 3.1 8B: ~6-8GB RAM
-- n8n: ~500MB
-- Agent: ~500MB
-- Frontend: ~300MB
-- System: ~1GB
-Total: ~8-10GB
-
-Reality: CPU inference is SLOW (5-10 seconds per response)
-```
-
-### Comfortable Specs (Good Experience)
-```
-CPU:     6-8 cores
-RAM:     16GB minimum, 32GB ideal
-Storage: 60GB SSD
-GPU:     NVIDIA GPU with 6GB+ VRAM (game changer)
-
-With GPU:
-- Response time: 1-2 seconds (vs 5-10 on CPU)
-- Can run larger models (13B+)
-- Better quality responses
-```
-
----
-
-## Hosting Options Comparison
-
-### 🏠 Hostinger VPS
-
-**Pros:**
-- ✅ Cheap ($8-20/month for 8GB RAM)
-- ✅ Root access for Docker
-- ✅ Fixed pricing
-- ✅ European data centers (good for privacy)
-
-**Cons:**
-- ❌ No GPU support
-- ❌ CPU-only = slow LLM inference
-- ❌ Shared CPU (noisy neighbors)
-- ❌ Limited to smaller models
-
-**Recommended Plan:**
-- **VPS 2:** 8GB RAM, 4 cores, 200GB SSD (~$12/month)
-  - Can run small LLM (Llama 3.1 8B)
-  - Expect 5-10 second response times
-  - Workable for personal use
-
----
-
-### ☁️ AWS EC2
-
-**Pros:**
-- ✅ Wide range of instance types
-- ✅ GPU instances available (g4dn, g5)
-- ✅ Pay-as-you-go (can stop when not using)
-- ✅ Better performance/scaling
-- ✅ Spot instances = 70-90% cheaper
-
-**Cons:**
-- ❌ More expensive (on-demand)
-- ❌ Complex pricing (can get expensive fast)
-- ❌ Requires more AWS knowledge
-
-**Recommended Options:**
-
-**Option A - CPU Only (Budget):**
-```
-Instance: t3.xlarge
-Specs:    4 vCPU, 16GB RAM
-Price:    ~$120/month (on-demand)
-          ~$75/month (1-year reserved)
-          ~$10-15/month (spot instance, can be interrupted)
-
-Good for: Testing, personal use with spot instances
-```
-
-**Option B - GPU (Best Performance):**
-```
-Instance: g4dn.xlarge
-Specs:    4 vCPU, 16GB RAM, NVIDIA T4 GPU (16GB)
-Price:    ~$380/month (on-demand)
-          ~$240/month (1-year reserved)
-          ~$120/month (spot instance)
-
-Best for: Production use, fast responses
-```
-
----
-
-### 🌊 DigitalOcean
-
-**Pros:**
-- ✅ Simple pricing
-- ✅ Good documentation
-- ✅ GPU droplets available
-- ✅ Better than Hostinger for compute
-
-**Cons:**
-- ❌ GPU instances expensive (~$700/month)
-- ❌ More expensive than Hostinger for basic VPS
-
-**Recommended Plan:**
-```
-CPU-Optimized: 8GB RAM, 4 vCPU
-Price: ~$84/month
-Better CPU than Hostinger, still no GPU
-```
-
----
-
-### 🎮 Vast.ai / RunPod (GPU Specialists)
-
-**Pros:**
-- ✅ Cheapest GPU access
-- ✅ Purpose-built for AI workloads
-- ✅ $0.20-0.50/hour for GPU instances
-- ✅ Can pause/resume to save costs
-
-**Cons:**
-- ❌ Less polished than AWS
-- ❌ Variable availability
-- ❌ Not traditional hosting
-
-**Example Pricing:**
-```
-RTX 3060 (12GB): ~$0.25/hour = ~$180/month
-RTX 4090 (24GB): ~$0.60/hour = ~$430/month
-(But you can stop it when not using!)
-```
-
----
-
-### 🏡 Self-Hosted (Your Own Hardware)
-
-**Best if you have:**
-- Spare desktop/laptop with 16GB+ RAM
-- Raspberry Pi 5 (8GB) - can run tiny models
-- Old gaming PC with GPU
-
-**Pros:**
-- ✅ Free hosting (aside from electricity)
-- ✅ Full control
-- ✅ No monthly fees
-- ✅ Can use existing GPU
-
-**Cons:**
-- ❌ Power costs (~$5-10/month)
-- ❌ Uptime management
-- ❌ Network setup (port forwarding, SSL)
-
----
-
-## Recommended Deployment Tiers
-
-### Tier 1: "Just Get It Running" - Hostinger
-```
-Cost:       $12/month
-Hardware:   8GB RAM, 4 cores
-Config:     Hybrid (local n8n, cloud LLM/STT/TTS)
-Experience: Good, requires API keys
-Setup:      1 hour
-
-Components:
-- ✅ n8n (local)
-- ✅ Agent (local)
-- ✅ Frontend (local)
-- ☁️ OpenAI LLM
-- ☁️ Deepgram STT
-- ☁️ OpenAI TTS
-- ☁️ LiveKit Cloud
-```
-
-### Tier 2: "Local LLM" - AWS t3.xlarge Spot
-```
-Cost:       $10-15/month (spot) or $75/month (reserved)
-Hardware:   16GB RAM, 4 cores
-Config:     Local LLM (Ollama), cloud STT/TTS
-Experience: Slower responses (5-10s) but private
-Setup:      2 hours
-
-Components:
-- ✅ n8n (local)
-- ✅ Ollama + Llama 3.1 8B (local)
-- ✅ Agent (local)
-- ✅ Frontend (local)
-- ☁️ Deepgram STT
-- ☁️ OpenAI TTS
-- ☁️ LiveKit Cloud
-```
-
-### Tier 3: "Fast & Private" - AWS g4dn.xlarge Spot
-```
-Cost:       $120/month (spot) or $240/month (reserved)
-Hardware:   16GB RAM, 4 cores, NVIDIA T4 GPU
-Config:     Everything local including Whisper + Coqui
-Experience: Fast (1-2s responses), fully private
-Setup:      4 hours
-
-Components:
-- ✅ n8n (local)
-- ✅ Ollama + Llama 3.1 8B/13B (local, GPU)
-- ✅ Whisper.cpp (local STT)
-- ✅ Coqui TTS (local)
-- ✅ Agent (local)
-- ✅ Frontend (local)
-- ☁️ LiveKit Cloud (optional)
-```
-
-### Tier 4: "Home Lab" - Self-Hosted
-```
-Cost:       $0/month + electricity (~$5-10)
-Hardware:   Your own machine (16GB+ RAM)
-Config:     Everything local
-Experience: Best control, no usage limits
-Setup:      Half day (network setup)
-
-Components:
-- ✅ Everything local
-- ✅ Optional LiveKit self-hosted
-- ✅ Full air-gap capability
-```
-
----
-
-## Recommended Approach: Phased Implementation
-
-### Phase 1: Hybrid (Easiest Distribution) ⭐ RECOMMENDED START
-```yaml
-Docker Compose Stack:
-  - n8n (workflows)
-  - Ollama (LLM) - optional, can use cloud
-  - Python agent
-  - Next.js frontend
-  - PostgreSQL (for n8n persistence)
-
-External Services:
-  - LiveKit Cloud (free tier)
-  - Deepgram STT (pay-per-use)
-  - OpenAI TTS (pay-per-use)
-  - OpenAI LLM (optional fallback)
-
-Deployment:
-  - One-command startup: docker-compose up -d
-  - Pre-configured n8n workflows
-  - Ollama model auto-downloaded (Llama 3.1 8B)
-  - Template .env with cloud/local toggle
-
-Benefits:
-  - 80% self-hosted
-  - Users choose cloud or local LLM
-  - Easy to get working
-  - Good enough for most users
-```
-
-### Phase 2: Mostly Self-Hosted
-```yaml
-Additions:
-  - Whisper.cpp for local STT
-  - Coqui TTS for local voice
-  - LiveKit configuration guide
-
-Trade-offs:
-  - 95% self-hosted
-  - Some quality reduction on STT/TTS
-  - Still recommend LiveKit Cloud
-```
-
-### Phase 3: Fully Air-Gapped
-```yaml
-Complete Stack:
-  - Everything including LiveKit server
-  - Complex networking configuration
-  - SSL certificate management
-  - TURN/STUN setup
-
-Target:
-  - 100% self-hosted
-  - Advanced users only
-  - Enterprise/privacy-focused deployments
-```
-
----
-
-## Recommended Initial Setup
-
-### Platform: AWS EC2 t3.xlarge Spot Instance
-
-**Specifications:**
-```
-Instance:   t3.xlarge Spot
-vCPU:       4 cores
-RAM:        16GB
-Storage:    60GB SSD
-Cost:       $10-15/month (spot pricing in us-east-1)
-Region:     us-east-1 (cheapest)
-OS:         Ubuntu 22.04 LTS
-```
-
-**Configuration:**
-```yaml
-Local Components:
-  - n8n
-  - Ollama (Llama 3.1 8B)
-  - Python agent
-  - Next.js frontend
-  - PostgreSQL
-
-Cloud Components:
-  - Deepgram (STT)
-  - OpenAI TTS
-  - LiveKit Cloud
-```
-
-**Why This Setup:**
-- ✅ Cheap enough to experiment ($10-15/month)
-- ✅ Enough RAM for decent LLM (8B models)
-- ✅ Can upgrade to GPU later if needed
-- ✅ Spot pricing = 90% cheaper than on-demand
-- ✅ Easy auto-restart if interrupted
-- ✅ Accept 5-10 second LLM response times (CPU inference)
-
-**Setup Process:**
-1. Launch EC2 t3.xlarge spot instance
-2. Configure security group (ports 3000, 7880, 5678)
-3. SSH in and clone repository
-4. Run: `docker-compose up -d`
-5. Ollama downloads model on first run (~5GB)
-6. Total setup time: ~30 minutes
-
----
-
-## Docker Architecture (Phase 1)
+#### Example `docker-compose.yml` Structure:
 
 ```yaml
-# docker-compose.yml structure
 version: '3.8'
 
 services:
-  # PostgreSQL for n8n
-  postgres:
-    image: postgres:15
-    environment:
-      - POSTGRES_DB=n8n
-      - POSTGRES_USER=n8n
-      - POSTGRES_PASSWORD=n8n
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-  # n8n - Workflow automation
-  n8n:
-    image: n8nio/n8n
-    ports:
-      - "5678:5678"
-    environment:
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
-      - N8N_BASIC_AUTH_ACTIVE=true
-      - N8N_BASIC_AUTH_USER=admin
-      - N8N_BASIC_AUTH_PASSWORD=admin
-    volumes:
-      - n8n_data:/home/node/.n8n
-      - ./n8n-workflows:/import
-    depends_on:
-      - postgres
-
-  # Ollama - Local LLM (optional)
-  ollama:
-    image: ollama/ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_models:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-    # Uncomment for GPU support:
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-
-  # Python Agent
-  agent:
-    build: ./agent
-    environment:
-      - LIVEKIT_URL=${LIVEKIT_URL}
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
-      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
-      - LLM_MODEL=${LLM_MODEL:-llama3.1:8b}
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
-      - N8N_WEBHOOK_BASE_URL=http://n8n:5678/webhook
-      - N8N_API_KEY=${N8N_API_KEY}
-    depends_on:
-      - ollama
-      - n8n
-
-  # Next.js Frontend
   webapp:
     build: ./webapp
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_LIVEKIT_URL=${LIVEKIT_URL}
-      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
-      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
-    depends_on:
-      - agent
+    # ...
 
-volumes:
-  postgres_data:
-  n8n_data:
-  ollama_models:
+  agent:
+    build: ./agent
+    # No ports exposed; internal only
+    # ...
+
+  n8n:
+    image: n8nio/n8n
+    # No ports exposed by default; accessed via SSH tunnel
+    # ...
+
+  livekit:
+    image: livekit/livekit-server:latest
+    ports:
+      - "7880:7880" # Required for client connection
+      # ... plus UDP ports for media
+    # ...
+
+  redis:
+    image: redis:7-alpine
+    # No ports exposed; internal only
+    # ...
+
+  ollama:
+    image: ollama/ollama
+    # No ports exposed; internal only
+    # ...
 ```
 
 ---
 
-## Component Breakdown
+## 3. The "Appliance" Security Model
 
-### Feasibility Matrix
+This architecture is designed to minimize exposure to the public internet. We achieve this with three layers of security.
 
-| Component | Difficulty | Resource Cost | Status | Recommendation |
-|-----------|-----------|---------------|--------|----------------|
-| n8n | ⭐ Easy | Low | ✅ Ready | Bundle it |
-| Local LLM (Ollama) | ⭐⭐⭐ Medium | High (8-16GB RAM) | ✅ Ready | Bundle with cloud fallback |
-| Python Agent | ⭐ Easy | Low | ✅ Ready | Bundle it |
-| Next.js Frontend | ⭐ Easy | Low | ✅ Ready | Bundle it |
-| LiveKit Server | ⭐⭐⭐⭐ Hard | Medium | ⚠️ Complex | Make optional/cloud |
-| STT (Deepgram) | N/A | API cost | ☁️ Cloud | Need Whisper.cpp alternative |
-| TTS (OpenAI) | N/A | API cost | ☁️ Cloud | Need Coqui TTS alternative |
-| PostgreSQL | ⭐ Easy | Low | ✅ Ready | Bundle it |
+#### Layer 1: Inbound Connections (The Cloud Firewall)
+The cloud provider's firewall is our first line of defense. It controls what traffic from the internet can reach our server.
 
----
+*   **Publicly Open Ports:**
+    *   `webapp` (Port 3000): Must be open so users can access the web interface.
+    *   `livekit` (Port 7880 + a UDP range): Must be open so the user's browser can establish a voice connection.
+*   **Private Admin Ports:**
+    *   `n8n` (Port 5678): Should **NOT** be exposed to the public. It will be accessed securely via an **SSH Tunnel**, making the admin panel accessible on the developer's local machine without opening a public port.
 
-## Cost Comparison (Monthly)
+#### Layer 2: Internal Connections (The Private Docker Network)
+Services that only need to talk to each other will not have a `ports` mapping in Docker Compose. They are invisible to the internet.
 
-| Tier | Platform | Specs | Cost | LLM Speed | Privacy |
-|------|----------|-------|------|-----------|---------|
-| 1 | Hostinger VPS 2 | 8GB, 4 cores | $12 | Cloud (fast) | Medium |
-| 2 | AWS t3.xlarge Spot | 16GB, 4 cores | $10-15 | CPU (5-10s) | High |
-| 2 | AWS t3.xlarge Reserved | 16GB, 4 cores | $75 | CPU (5-10s) | High |
-| 3 | AWS g4dn.xlarge Spot | 16GB, GPU | $120 | GPU (1-2s) | Very High |
-| 3 | AWS g4dn.xlarge Reserved | 16GB, GPU | $240 | GPU (1-2s) | Very High |
-| 4 | Self-hosted | Your hardware | $5-10 | Varies | Complete |
+*   **Internal-Only Services:** `agent`, `ollama`, `redis`.
+*   **Communication:** They communicate freely and securely over the private network created by Docker Compose (e.g., the `agent` connects to `http://ollama:11434`).
+
+#### Layer 3: Outbound Connections (To External APIs)
+Connections from our server *out* to services like Deepgram or OpenAI are handled differently.
+
+*   **No Firewall Rules Needed:** Outgoing traffic is allowed by default on all servers.
+*   **Security:** These connections are secured using **HTTPS**, which encrypts the traffic (including your API keys) between your agent and the third-party service.
 
 ---
 
-## Next Steps (When Ready)
+## 4. Recommended Hosting & Hardware
 
-1. ✅ Create `docker-compose.yml` for Phase 1
-2. ✅ Create Dockerfiles for agent and webapp
-3. ✅ Add initialization scripts for:
-   - Ollama model download
-   - n8n workflow import
-   - Database migrations
-4. ✅ Create `.env.template` with all configuration options
-5. ✅ Add deployment documentation
-6. ✅ Create AWS/Hostinger setup guides
-7. ✅ Add monitoring/logging setup
-8. ⏸️ Phase 2: Add Whisper.cpp and Coqui TTS (later)
-9. ⏸️ Phase 3: Add LiveKit server configuration (advanced)
+To run the full, private JEX appliance with a local LLM, a powerful server is required. The LLM is the most demanding component.
+
+#### Hardware Requirements:
+*   **GPU (Critical for Performance):** A modern NVIDIA GPU with at least **16-24GB of VRAM** (e.g., RTX 3090, RTX 4090, A100). This is the difference between a 1-2 second response time and a 10-20 second response time.
+*   **System RAM:** **32GB minimum** to comfortably run the LLM and all other services.
+*   **CPU & Storage:** A modern multi-core CPU and a fast SSD (at least 100GB).
+
+#### Recommended Hosting Provider for Testing:
+For testing performance and usability, a specialized GPU cloud provider is the best choice due to simplicity and cost-effectiveness.
+
+*   **Primary Recommendation:** **RunPod** (or Lambda Labs, Vast.ai)
+*   **Why:** They offer simple, on-demand access to powerful GPUs at a lower cost than major clouds. Their platforms are Docker-native and designed for this exact use case. The ability to "pause" the instance makes them very cost-effective for experimentation.
 
 ---
 
-## Notes
+## 5. The Path Forward & Key Decisions
 
-- **Current Focus:** Save this plan for later
-- **Priority:** Return to feature development
-- **Revisit:** When ready to package and distribute
-- **Recommendation:** Start with AWS t3.xlarge Spot for best value/performance balance
+This plan provides a clear architectural blueprint. Before final implementation, the following strategic decisions need to be made.
+
+#### Deployment Workflow Summary:
+A user's deployment process would be:
+1.  Rent a suitable GPU server from a provider like RunPod.
+2.  Connect via SSH and clone the JEX repository.
+3.  Configure the `.env` file with any necessary API keys.
+4.  Run `docker-compose up -d`.
+5.  Access the web UI and start using their private JEX instance.
+
+#### Key Decisions to be Made:
+1.  **Default Components (Local vs. Cloud):**
+    *   Should the default setup use the local `ollama` LLM, or should it be configured to use a cloud service like OpenAI out-of-the-box?
+    *   **Decision:** We should default to a local LLM to align with the privacy-first philosophy, but allow easy configuration to switch to a cloud provider via the `.env` file.
+
+2.  **Default Local Models:**
+    *   Which specific models should be the default for a local setup? This is a trade-off between performance and resource requirements.
+    *   **Decision:** We should choose a strong but efficient model as the default (e.g., `Llama-3.1-8B-Instruct`) and document how to switch to larger or smaller models. The same decision is needed for local STT (e.g., Whisper) and TTS (e.g., Piper).
+
+3.  **LiveKit Configuration:**
+    *   Should the default `docker-compose.yml` include the self-hosted LiveKit server, or assume the user will start with the free tier of LiveKit Cloud?
+    *   **Decision:** For maximum ease of use, the default should rely on **LiveKit Cloud**. We can provide a separate, advanced `docker-compose.livekit.yml` file for users who want to take the extra step of self-hosting the voice infrastructure.
+
+---
+
+## 6. Future Scaling: Kubernetes
+
+It's important to distinguish this single-host plan from a large-scale production system.
+
+*   **Docker Compose:** Is perfect for managing all of JEX's services on a **single server**.
+*   **Kubernetes:** Is an orchestration service for deploying and managing applications across a **cluster of multiple servers**.
+
+We would only need to migrate from Docker Compose to Kubernetes if JEX evolved into a multi-tenant SaaS application requiring high availability, fault tolerance, and auto-scaling across many machines. For the private appliance model, Docker Compose remains the right tool for the job.
