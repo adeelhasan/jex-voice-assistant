@@ -255,6 +255,7 @@ async def recall_context(context_type: str) -> str:
         return f"No {context_type} data in memory. Fetch fresh data first."
 
     data = result['data']
+    metadata = result['metadata']
     age = result['age_seconds']
 
     logger.info(f"Recalled {context_type}: {len(data) if isinstance(data, list) else 1} items, {age:.0f}s old")
@@ -263,7 +264,8 @@ async def recall_context(context_type: str) -> str:
     artifact_type_map = {
         'emails': 'email_list',
         'calendar': 'calendar_events',
-        # Future: 'flights': 'flight_options', etc.
+        'weather': 'weather',
+        # Future: 'flights': 'flight_options', 'youtube': 'summary_with_links', etc.
     }
 
     if context_type in artifact_type_map:
@@ -272,11 +274,226 @@ async def recall_context(context_type: str) -> str:
             'data': data
         })
 
-    # Return the data as JSON for the LLM to parse
-    # The LLM can understand "the 3rd email" or "first meeting" from this
-    return json.dumps({
+    # Build response for LLM
+    llm_response = {
         'context_type': context_type,
         'data': data,
         'age_seconds': int(age),
         'count': len(data) if isinstance(data, list) else 1
+    }
+
+    # For weather, include raw forecast for detailed questions
+    # (e.g., "What's the wind speed on Friday?", "How much precipitation on Saturday?")
+    if context_type == 'weather' and metadata.get('raw_forecast'):
+        llm_response['detailed_forecast'] = metadata['raw_forecast']
+
+    # Return the data as JSON for the LLM to parse
+    # The LLM can understand "the 3rd email", "first meeting", "Friday's weather", etc.
+    return json.dumps(llm_response)
+
+
+@function_tool()
+async def get_weather() -> str:
+    """
+    Fetch fresh 7-day weather forecast from API.
+
+    Call this tool when:
+    - User asks about weather for the FIRST time in the conversation
+    - User explicitly requests "refresh" or "check again"
+    - Cached data is stale (>1 hour old)
+
+    DO NOT call for follow-up questions about weather just discussed.
+    For follow-ups (e.g., "What about Friday?", "Will it rain tomorrow?"),
+    use recall_context('weather') instead to avoid unnecessary API calls.
+
+    Examples of FIRST weather questions (call this tool):
+    - "What's the weather?"
+    - "How's it looking this week?"
+    - "Should I bring an umbrella today?"
+
+    Data is cached for 1 hour for follow-up queries.
+
+    Returns:
+        Weather summary for voice response
+    """
+    import logging
+    import os
+    logger = logging.getLogger(__name__)
+
+    logger.info(f"@@@ GET_WEATHER TOOL CALLED @@@")
+
+    # Get location from environment variable and parse lat/lon
+    location = os.getenv("WEATHER_LOCATION", "40.7128,-74.0060")  # Default to NYC
+    logger.info(f"Using location: {location}")
+
+    # Parse lat,lon from environment variable
+    try:
+        lat, lon = location.split(",")
+        lat = lat.strip()
+        lon = lon.strip()
+    except ValueError:
+        logger.error(f"Invalid WEATHER_LOCATION format: {location}. Expected 'lat,lon'")
+        return "I couldn't get the weather. Location is not configured properly."
+
+    # Call n8n weather workflow (test endpoint)
+    result = await call_n8n_workflow(
+        endpoint="weather-forecast",
+        payload={"lat": lat, "lon": lon}
+    )
+
+    logger.info(f"Weather result: {result}")
+
+    # Extract speech and artifact from n8n response
+    speech = result.get("speech", "I couldn't get the weather forecast.")
+    artifact = result.get("artifact")
+
+    if artifact and artifact.get("data"):
+        daily_data = artifact["data"]
+
+        # Transform to WeatherWidget format
+        # Extract current weather from first day
+        today = daily_data[0] if daily_data else {}
+
+        transformed_data = {
+            "current": {
+                "temperature": today.get("high", 0),
+                "unit": "C",  # Data is in Celsius
+                "condition": today.get("conditions", "Unknown"),
+                "location": "Your Location",  # Could be from env var
+                "humidity": None,  # Not available in current data
+                "feels_like": None
+            },
+            "daily": [
+                {
+                    "date": day["date"].split("-")[2] + "/" + day["date"].split("-")[1],  # Format as DD/MM
+                    "high": day["high"],
+                    "low": day["low"]
+                }
+                for day in daily_data
+            ]
+        }
+
+        logger.info(f"Transformed weather data with {len(transformed_data['daily'])} days")
+
+        # Send to frontend
+        await send_artifact_to_frontend({
+            "type": "weather",
+            "data": transformed_data
+        })
+
+        # Store TRANSFORMED data for follow-up queries (same format as displayed)
+        # Also store original daily_data in metadata for detailed LLM analysis
+        store = get_context_store()
+        store.save(
+            context_type='weather',
+            data=transformed_data,  # Store transformed data so recall_context displays correctly
+            metadata={
+                'location': location,
+                'days': len(daily_data),
+                'raw_forecast': daily_data  # LLM can analyze detailed conditions, wind, precipitation
+            }
+        )
+        logger.info(f"Stored weather forecast for {location} in context")
+
+    logger.info(f"@@@ GET_WEATHER TOOL COMPLETE @@@")
+    return speech
+
+
+@function_tool()
+async def search_youtube(query: str, count: int = 3) -> str:
+    """
+    Search and summarize YouTube videos.
+
+    Args:
+        query: Search query or topic
+        count: Number of videos to analyze (1-5)
+
+    Returns:
+        Summary of videos for voice response
+    """
+    result = await call_n8n_workflow("youtube-summarize", {
+        "query": query,
+        "count": min(count, 5)
     })
+
+    # Adapter: Transform to minimal artifact format
+    # Support both 'summary' (custom) and 'speech' (JEX standard)
+    speech = result.get("summary", result.get("speech", "I couldn't find YouTube videos."))
+    videos = result.get("videos", [])
+
+    if videos:
+        # Create minimal artifact: summary + links (max 3 for cognitive load)
+        artifact = {
+            "type": "summary_with_links",
+            "data": {
+                "title": f"YouTube: {query}",
+                "summary": speech,
+                "links": [
+                    {
+                        "text": v.get("title", "Untitled Video"),
+                        "url": v.get("url", ""),
+                        "subtitle": v.get("channel", "")
+                    }
+                    for v in videos[:3]  # Max 3 links for minimal cognitive load
+                ]
+            }
+        }
+        await send_artifact_to_frontend(artifact)
+
+        store = get_context_store()
+        store.save(
+            context_type='youtube',
+            data=videos,
+            metadata={'query': query, 'count': count}
+        )
+
+    return speech
+
+
+@function_tool()
+async def search_x_feed(topic: str = "my feed", count: int = 5) -> str:
+    """
+    Search and summarize X.com (Twitter) posts.
+
+    Args:
+        topic: Topic to search or "my feed" for personal timeline
+        count: Number of posts to analyze (1-10)
+
+    Returns:
+        Summary of posts for voice response
+    """
+    result = await call_n8n_workflow("x-feed-summary", {
+        "topic": topic,
+        "count": min(count, 10)
+    })
+
+    # Adapter: Transform to minimal artifact format (reuse summary_with_links)
+    speech = result.get("summary", result.get("speech", "I couldn't fetch X posts."))
+    posts = result.get("posts", [])
+
+    if posts:
+        artifact = {
+            "type": "summary_with_links",
+            "data": {
+                "title": f"X.com: {topic}",
+                "summary": speech,
+                "links": [
+                    {
+                        "text": p.get("text", "")[:100] + "..." if len(p.get("text", "")) > 100 else p.get("text", ""),
+                        "url": p.get("url", ""),
+                        "subtitle": f"{p.get('author', '')} • {p.get('engagement', '')}"
+                    }
+                    for p in posts[:3]  # Max 3 for minimal cognitive load
+                ]
+            }
+        }
+        await send_artifact_to_frontend(artifact)
+
+        store = get_context_store()
+        store.save(
+            context_type='x_feed',
+            data=posts,
+            metadata={'topic': topic, 'count': count}
+        )
+
+    return speech

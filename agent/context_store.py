@@ -11,11 +11,16 @@ from threading import Lock
 
 
 class ContextStore:
-    """SQLite-backed storage for conversation context with JSON flexibility."""
+    """
+    SQLite-backed storage for conversation context with JSON flexibility.
+
+    Default TTL: 1 hour (3600 seconds) - suitable for weather, emails, calendar.
+    Weather data refreshes hourly to stay current.
+    """
 
     def __init__(self, db_path: str = "context.db", ttl_seconds: int = 3600):
         self.db_path = db_path
-        self.ttl_seconds = ttl_seconds
+        self.ttl_seconds = ttl_seconds  # Default: 1 hour
         self._lock = Lock()  # Thread-safe for scheduled jobs
         self._init_db()
 
