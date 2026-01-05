@@ -14,10 +14,11 @@
 - ✅ **Phase 2**: Email Integration - Gmail integration via n8n with visual artifact panel
 - ✅ **Phase 3**: Calendar Integration - Google Calendar with event display
 - ✅ **Phase 4**: Context Management - SQLite-based memory for follow-up queries
+- ✅ **Phase 5**: Weather Integration - 7-day forecast with intelligent caching and follow-up queries
 
 **Long-term Vision**:
-- Full personal assistant with email, calendar, weather, and custom workflow integration
-- Extensible tool system for adding new capabilities ✅ (partially complete)
+- Full personal assistant with email, calendar, weather, and custom workflow integration ✅ (core integrations complete)
+- Extensible tool system for adding new capabilities ✅ (pattern established)
 - Visual artifact panel for displaying data alongside voice responses ✅ (complete)
 - Multi-modal interaction (voice + visual data) ✅ (complete)
 - Conversation persistence and context management ✅ (context management complete)
@@ -130,8 +131,8 @@ jarivsalexa/
 ├── agent/                      # Python LiveKit agent (middleware)
 │   ├── main.py                # Agent entrypoint, session management
 │   ├── config.py              # LLM/STT/TTS provider configuration
-│   ├── tools.py               # ✅ Function tools (read_emails, read_calendar, recall_context)
-│   ├── context_store.py       # ✅ SQLite context storage for follow-up queries
+│   ├── tools.py               # ✅ Function tools (read_emails, read_calendar, get_weather, recall_context)
+│   ├── context_store.py       # ✅ SQLite context storage for follow-up queries (1-hour TTL)
 │   ├── requirements.txt       # Python dependencies
 │   └── .env                   # Environment variables (gitignored)
 │
@@ -147,7 +148,7 @@ jarivsalexa/
 │   │           └── route.ts   # ✅ Manual agent dispatch endpoint
 │   ├── components/
 │   │   ├── VoiceAgent.tsx     # Main voice interface & agent dispatcher
-│   │   └── ArtifactPanel.tsx  # ✅ Visual data display (emails, calendar)
+│   │   └── ArtifactPanel.tsx  # ✅ Visual data display (emails, calendar, weather)
 │   ├── package.json           # Node dependencies
 │   └── .env.local             # Frontend environment vars (gitignored)
 │
@@ -387,15 +388,18 @@ store = create_store(os.getenv("STORAGE_BACKEND", "sqlite"))
 Users want to ask follow-up questions about previously fetched data without re-triggering expensive API calls:
 - "What was email 2 about?" (after checking emails)
 - "What time is my first meeting?" (after viewing calendar)
+- "Will it rain on Friday?" (after checking weather)
 - "Tell me more about option 3" (after flight search)
 
 **Design Philosophy:**
 Let the LLM do the heavy lifting. Instead of complex reference resolution logic, we:
-1. **Store raw data** as JSON (emails, calendar events, flight options, etc.)
+1. **Store transformed data** as JSON (emails, calendar events, weather forecasts, etc.)
 2. **Pass it back to the LLM** when needed via recall_context() tool
 3. **Let the LLM extract** what the user is asking about
 
-The LLM already understands "the 3rd email", "first meeting", "that event" - we just provide the data.
+The LLM already understands "the 3rd email", "first meeting", "Friday's weather" - we just provide the data.
+
+**Critical:** Store data in the SAME format that the artifact panel displays. For weather, we store the transformed data (with `current` and `daily` fields) plus raw forecast in metadata for detailed LLM analysis.
 
 **Implemented Architecture:**
 
@@ -503,37 +507,46 @@ Instead of separate `get_stored_emails()`, `get_stored_calendar()`, etc.:
 # Generic, extensible
 recall_context('emails')
 recall_context('calendar')
-recall_context('flights')  # Future - no code changes needed!
+recall_context('weather')     # ✅ Implemented
+recall_context('flights')     # Future - no code changes needed!
 ```
 
 **Extensibility Pattern:**
 
-Adding a new data source automatically gets context support:
+Adding a new data source automatically gets context support. Example: weather (implemented):
 
 ```python
-# 1. Create new tool (e.g., flights)
+# 1. Create new tool
 @function_tool()
-async def search_flights(destination: str, date: str) -> str:
-    result = await call_api(...)
+async def get_weather() -> str:
+    result = await call_n8n_workflow("weather-forecast", {"lat": lat, "lon": lon})
 
-    # Auto-store (same pattern as emails/calendar)
+    # Transform data to match artifact panel format
+    transformed_data = {...}  # With 'current' and 'daily' fields
+
+    # Store transformed data (same format as displayed)
     store = get_context_store()
-    store.save('flights', result['options'],
-               metadata={'destination': destination, 'date': date})
+    store.save(
+        context_type='weather',
+        data=transformed_data,  # Display format
+        metadata={'raw_forecast': daily_data}  # Detailed data for LLM
+    )
 
-    return result['summary']
+    await send_artifact_to_frontend({"type": "weather", "data": transformed_data})
+    return speech
 
-# 2. Update artifact panel type map
+# 2. Update artifact panel type map (in recall_context)
 artifact_type_map = {
     'emails': 'email_list',
     'calendar': 'calendar_events',
-    'flights': 'flight_options',  # NEW - just add here
+    'weather': 'weather',  # ✅ Added
+    # Future: 'flights': 'flight_options',
 }
 
 # 3. That's it! Now users can:
-# "Find flights to Florida"
-# "Tell me more about option 3"  → recall_context('flights')
-# "Book that one"  → LLM extracts flight_id from recalled data
+# "What's the weather?"  → get_weather() [first call, fetches fresh]
+# "Will it rain on Friday?"  → recall_context('weather') [follow-up, uses cache]
+# "When's a good day to golf?"  → recall_context('weather') [LLM analyzes conditions]
 ```
 
 **Scheduled Jobs Support:**
@@ -911,10 +924,15 @@ OPENAI_API_KEY=sk-...
 DEEPGRAM_API_KEY=...
 ANTHROPIC_API_KEY=...        # If using Claude
 
-# Phase 2: n8n Integration
-N8N_WEBHOOK_BASE_URL=https://your-n8n.app.n8n.cloud/webhook
-N8N_GMAIL_WEBHOOK=...
-N8N_CALENDAR_WEBHOOK=...
+# n8n Workflow Integration
+# For production webhooks (UUIDs): endpoint will be https://architoon.app.n8n.cloud/webhook/{UUID}
+# For test webhooks: set base URL to https://architoon.app.n8n.cloud/webhook-test
+N8N_WEBHOOK_BASE_URL=https://architoon.app.n8n.cloud/webhook-test
+N8N_API_KEY=your-n8n-api-key  # Optional, if webhook requires auth
+
+# Personal Preferences
+# Weather location: latitude,longitude (e.g., "43.6532,-79.3832" for Toronto)
+WEATHER_LOCATION=40.7128,-74.0060
 ```
 
 **Frontend (.env.local):**
@@ -1104,29 +1122,33 @@ async def test_email_query_flow():
 
 ### Agent Files
 
-**`agent/main.py`** (~167 lines)
+**`agent/main.py`** (~149 lines) ✅ UPDATED
 - Main entrypoint: `@server.rtc_session() async def entrypoint(ctx: JobContext)`
-- JexAgent class with comprehensive instructions for tools and context management
-- Session initialization and startup
-- Registered tools: read_emails, read_calendar, recall_context
+- JexAgent class with "Americanized Jarvis" personality (ambient, informal)
+- Comprehensive tool usage instructions (first call vs follow-ups)
+- Time-based greetings with random variation
+- Registered tools: read_emails, read_calendar, get_weather, recall_context
 
 **`agent/config.py`** (98 lines)
 - Provider enums (LLM, STT, TTS)
 - Config dataclasses
 - Factory functions: `create_llm()`, `create_stt()`, `create_tts()`
 
-**`agent/tools.py`** (~283 lines) ✅ IMPLEMENTED
-- `call_n8n_workflow()`: HTTP client for n8n webhooks
+**`agent/tools.py`** (~499 lines) ✅ IMPLEMENTED
+- `call_n8n_workflow()`: HTTP client for n8n webhooks (supports test and production endpoints)
 - `send_artifact_to_frontend()`: LiveKit data channel publisher
 - `@function_tool read_emails()`: Gmail integration with auto-context storage
 - `@function_tool read_calendar()`: Google Calendar integration with auto-context storage
-- `@function_tool recall_context()`: Universal context retrieval for follow-ups
+- `@function_tool get_weather()`: 7-day weather forecast with lat/lon parsing and data transformation
+- `@function_tool recall_context()`: Universal context retrieval with metadata support
+- `@function_tool search_youtube()`: YouTube video search/summary (placeholder)
+- `@function_tool search_x_feed()`: X.com posts search/summary (placeholder)
 
-**`agent/context_store.py`** (~109 lines) ✅ IMPLEMENTED
-- `ContextStore` class: SQLite-based storage with TTL
+**`agent/context_store.py`** (~113 lines) ✅ IMPLEMENTED
+- `ContextStore` class: SQLite-based storage with 1-hour TTL
 - Thread-safe (Lock) for scheduled jobs
 - JSON columns for flexible data types
-- Auto-expiration on access
+- Auto-expiration on access (configurable TTL)
 - `get_context_store()`: Global singleton factory
 
 **`agent/requirements.txt`** (3 lines)
@@ -1145,12 +1167,13 @@ async def test_email_query_flow():
 - AgentInterface: state display (listening/thinking/speaking), mute controls
 - Uses hooks: useVoiceAssistant, useLocalParticipant, useRoomContext
 
-**`webapp/components/ArtifactPanel.tsx`** (~151 lines) ✅ IMPLEMENTED
-- `ArtifactRenderer`: Switches between email_list, calendar_events, generic views
+**`webapp/components/ArtifactPanel.tsx`** (~224 lines) ✅ IMPLEMENTED
+- `ArtifactRenderer`: Switches between email_list, calendar_events, weather, generic views
 - `EmailList`: Displays emails with sender, subject, snippet, timestamp
 - `CalendarEventList`: Displays events with date/time, location, description
+- `WeatherWidget`: Gradient blue card with current conditions and 7-day forecast
 - `useDataChannel`: Receives artifacts from agent via data channel
-- History navigation between email and calendar views
+- History navigation between artifacts (email, calendar, weather)
 
 **`webapp/app/api/token/route.ts`** (28 lines)
 - GET handler for LiveKit token generation
@@ -1265,12 +1288,21 @@ async def test_email_query_flow():
 - ✅ Force refresh via voice commands
 - ✅ Extensible pattern for new data sources
 
-### Phase 5+ (Future)
+### Phase 5 (✅ Complete)
+- ✅ Weather integration with 7-day forecast (get_weather tool + n8n workflow)
+- ✅ WeatherWidget displays current conditions and daily forecast
+- ✅ Lat/lon configuration via WEATHER_LOCATION environment variable
+- ✅ Intelligent caching (1-hour TTL, first call vs follow-ups)
+- ✅ Natural language weather queries ("When will it get warm?", "Is it going to rain?")
+- ✅ Context-aware follow-ups ("What about Friday?", "When's a good day to golf?")
+- ✅ Data transformation pattern (store display format + raw data in metadata)
+
+### Phase 6+ (Future)
 - Conversation persistence (full chat history across sessions)
 - Multi-agent orchestration (if needed)
 - Plugin system for custom tools
 - Production deployment with auth
-- Additional integrations (weather, flights, etc.)
+- Additional integrations (flights, news, task management, etc.)
 
 ---
 
