@@ -6,6 +6,8 @@ These functions are callable by the LLM to perform actions via n8n workflows.
 import os
 import json
 import httpx
+import asyncio
+import logging
 from typing import Optional
 from livekit.agents import function_tool, get_job_context
 from context_store import get_context_store
@@ -15,13 +17,14 @@ N8N_WEBHOOK_BASE_URL = os.getenv("N8N_WEBHOOK_BASE_URL", "")
 N8N_API_KEY = os.getenv("N8N_API_KEY", "")
 
 
-async def call_n8n_workflow(endpoint: str, payload: dict) -> dict:
+async def call_n8n_workflow(endpoint: str, payload: dict, timeout: float = 30.0) -> dict:
     """
     Call an n8n webhook workflow and return the response.
 
     Args:
         endpoint: Workflow endpoint path (e.g., "read-emails") OR full webhook ID
         payload: Data to send to the workflow
+        timeout: HTTP request timeout in seconds (default: 30s)
 
     Returns:
         Response from n8n with 'speech' and 'artifact' fields
@@ -40,13 +43,14 @@ async def call_n8n_workflow(endpoint: str, payload: dict) -> dict:
     logger.info(f"=== CALLING N8N WORKFLOW ===")
     logger.info(f"URL: {url}")
     logger.info(f"Payload: {payload}")
+    logger.info(f"Timeout: {timeout}s")
 
     headers = {
         "Content-Type": "application/json",
         "X-JEX-API-Key": N8N_API_KEY
     }
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             logger.info(f"Sending POST request to n8n...")
             response = await client.post(
@@ -450,50 +454,289 @@ async def search_youtube(query: str, count: int = 3) -> str:
     return speech
 
 
+def load_x_profiles() -> dict:
+    """Load X search profiles from environment variable."""
+    import json
+    logger = logging.getLogger(__name__)
+    profiles_json = os.getenv("X_SEARCH_PROFILES", "[]")
+
+    try:
+        profiles_list = json.loads(profiles_json)
+        # Convert list to dict keyed by name
+        return {p['name']: p for p in profiles_list}
+    except Exception as e:
+        logger.error(f"Failed to parse X_SEARCH_PROFILES: {e}")
+        return {}
+
+
+def hash_search_params(keywords: str, interests: str) -> str:
+    """Generate stable hash from search params for cache key."""
+    import hashlib
+    combined = f"{keywords}|{interests}"
+    return hashlib.md5(combined.encode()).hexdigest()[:8]
+
+
 @function_tool()
-async def search_x_feed(topic: str = "my feed", count: int = 5) -> str:
+async def search_x_feed(
+    profile_name: Optional[str] = None,
+    search_keywords: Optional[str] = None,
+    user_interests: Optional[str] = None,
+    force_refresh: bool = False
+) -> str:
     """
-    Search and summarize X.com (Twitter) posts.
+    Search X.com for trending threads matching keywords and interests.
+
+    Supports multiple search profiles (e.g., AI_Tech, Climate_Tech) or custom searches.
+    First call fetches fresh data (may take 30-60 seconds due to search + ranking).
+    Follow-up queries should use recall_context('x_feed:{profile}') for instant responses.
 
     Args:
-        topic: Topic to search or "my feed" for personal timeline
-        count: Number of posts to analyze (1-10)
+        profile_name: Named profile from config (e.g., "AI_Tech", "Climate_Tech")
+        search_keywords: Custom keywords (overrides profile)
+        user_interests: Custom interests (overrides profile)
+        force_refresh: Bypass cache even if recent data exists
 
     Returns:
-        Summary of posts for voice response
+        Summary of trending threads for voice response
     """
-    result = await call_n8n_workflow("x-feed-summary", {
-        "topic": topic,
-        "count": min(count, 10)
-    })
+    logger = logging.getLogger(__name__)
+    logger.info("@@@ SEARCH_X_FEED TOOL CALLED @@@")
 
-    # Adapter: Transform to minimal artifact format (reuse summary_with_links)
-    speech = result.get("summary", result.get("speech", "I couldn't fetch X posts."))
-    posts = result.get("posts", [])
+    store = get_context_store()
 
-    if posts:
-        artifact = {
-            "type": "summary_with_links",
-            "data": {
-                "title": f"X.com: {topic}",
-                "summary": speech,
-                "links": [
-                    {
-                        "text": p.get("text", "")[:100] + "..." if len(p.get("text", "")) > 100 else p.get("text", ""),
-                        "url": p.get("url", ""),
-                        "subtitle": f"{p.get('author', '')} • {p.get('engagement', '')}"
-                    }
-                    for p in posts[:3]  # Max 3 for minimal cognitive load
-                ]
-            }
-        }
-        await send_artifact_to_frontend(artifact)
+    # 1. Resolve profile or custom params
+    profiles = load_x_profiles()
 
-        store = get_context_store()
-        store.save(
-            context_type='x_feed',
-            data=posts,
-            metadata={'topic': topic, 'count': count}
+    if profile_name and profile_name in profiles:
+        # Use named profile
+        profile = profiles[profile_name]
+        keywords = profile['keywords']
+        interests = profile['interests']
+        cache_key = f"x_feed:{profile_name}"
+        logger.info(f"Using profile '{profile_name}'")
+    elif search_keywords or user_interests:
+        # Custom search
+        keywords = search_keywords or os.getenv("X_SEARCH_KEYWORDS", "AI, technology, programming")
+        interests = user_interests or os.getenv("X_USER_INTERESTS", "tech trends, software development")
+        cache_hash = hash_search_params(keywords, interests)
+        cache_key = f"x_feed:{cache_hash}"
+        logger.info(f"Custom search with hash {cache_hash}")
+    else:
+        # Use default profile
+        default_profile_name = os.getenv("X_DEFAULT_PROFILE", "AI_Tech")
+        if default_profile_name in profiles:
+            profile = profiles[default_profile_name]
+            keywords = profile['keywords']
+            interests = profile['interests']
+            cache_key = f"x_feed:{default_profile_name}"
+            profile_name = default_profile_name
+            logger.info(f"Using default profile '{default_profile_name}'")
+        else:
+            # Fallback to env vars
+            keywords = os.getenv("X_SEARCH_KEYWORDS", "AI, technology, programming")
+            interests = os.getenv("X_USER_INTERESTS", "tech trends, software development")
+            cache_hash = hash_search_params(keywords, interests)
+            cache_key = f"x_feed:{cache_hash}"
+            logger.info(f"Using fallback env vars with hash {cache_hash}")
+
+    # 2. Check cache first (unless force_refresh)
+    if not force_refresh:
+        cached = store.get_with_metadata(cache_key)
+        if cached:
+            age_minutes = cached['age_seconds'] / 60
+            logger.info(f"Using cached X feed (age: {age_minutes:.1f} min)")
+
+            # Re-publish artifact to frontend
+            await send_artifact_to_frontend({
+                "type": "x_feed",
+                "data": cached['data']
+            })
+
+            profile_label = profile_name or f"search {cache_key.split(':')[1]}"
+            return (f"Here are the trending threads for {profile_label} from {age_minutes:.0f} minutes ago. "
+                    f"I can search for fresh threads if you'd like.")
+
+    # 3. Fetch fresh data from n8n
+    logger.info(f"Fetching fresh X feed from n8n (keywords: {keywords[:50]}..., interests: {interests[:50]}...)")
+    logger.info("This may take 30-60 seconds for search + ranking...")
+
+    try:
+        # Use 90-second timeout for long-running workflow
+        result = await asyncio.wait_for(
+            call_n8n_workflow(
+                endpoint="9e9e4217-1b52-427c-a3cd-ef14d15bf44f",
+                payload={
+                    "searchKeywords": keywords,
+                    "userInterests": interests
+                },
+                timeout=90.0  # X feed search + ranking takes 30-60s
+            ),
+            timeout=90.0
         )
 
-    return speech
+        logger.info(f"n8n response received: {result}")
+
+        # 4. Parse response (n8n returns array with single item)
+        if isinstance(result, list) and len(result) > 0:
+            response_item = result[0]
+            speech = response_item.get("speech", "I found some trending threads.")
+            threads = response_item.get("data", [])
+        else:
+            speech = result.get("speech", "I found some trending threads.")
+            threads = result.get("data", [])
+
+        if not threads:
+            logger.warning("No threads returned from n8n workflow")
+            return "I couldn't find any trending threads matching your interests right now. Try different keywords?"
+
+        logger.info(f"Received {len(threads)} threads from n8n")
+
+        # 5. Store with profile-specific cache key
+        store.save(
+            context_type=cache_key,
+            data=threads,
+            metadata={
+                'profile_name': profile_name,
+                'keywords': keywords,
+                'interests': interests,
+                'thread_count': len(threads)
+            }
+        )
+        logger.info(f"Stored X feed in context with key '{cache_key}'")
+
+        # 6. Publish artifact to frontend
+        await send_artifact_to_frontend({
+            "type": "x_feed",
+            "data": threads
+        })
+
+        # 7. Generate speech response
+        if threads and len(threads) > 0:
+            top_thread = threads[0]
+            return (f"Found {len(threads)} trending threads. "
+                    f"The top one is from {top_thread.get('authorName', 'someone')} with "
+                    f"{top_thread.get('likes', 'many')} likes: {top_thread.get('postText', '')[:100]}...")
+        else:
+            return speech
+
+    except asyncio.TimeoutError:
+        logger.error("X feed search timed out after 90 seconds")
+        return "The X search is taking longer than expected. The n8n workflow might be busy. Please try again in a moment."
+
+    except Exception as e:
+        logger.error(f"Error fetching X feed: {e}", exc_info=True)
+        return f"I encountered an error searching X: {str(e)}. Please try again later."
+
+
+@function_tool(
+    name="preload_all_x_feeds",
+    description="Pre-fetch all configured X.com search profiles for instant trending queries. Fetches in parallel."
+)
+async def preload_all_x_feeds() -> str:
+    """
+    Pre-populate ALL configured X.com profiles (AI_Tech, Climate_Tech, Startup_News).
+    Fetches in parallel for speed (~30-60 seconds total).
+
+    Returns:
+        Status message with profile names and completion time
+    """
+    import time
+
+    profiles = load_x_profiles()
+
+    if not profiles:
+        return "No X search profiles configured. Cannot pre-load."
+
+    profile_names = list(profiles.keys())
+    start_time = time.time()
+
+    logger.info(f"Pre-loading {len(profile_names)} X profiles in parallel: {profile_names}")
+
+    # Fetch all profiles in parallel
+    tasks = [
+        search_x_feed(profile_name=name, force_refresh=True)
+        for name in profile_names
+    ]
+
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Check for errors
+        errors = [r for r in results if isinstance(r, Exception)]
+        if errors:
+            logger.error(f"Errors during preload: {errors}")
+
+        elapsed = time.time() - start_time
+
+        success_count = len(profile_names) - len(errors)
+
+        speech = (
+            f"Pre-loaded {success_count} of {len(profile_names)} X feeds "
+            f"in {elapsed:.1f} seconds. You can now ask about trending topics."
+        )
+
+        if errors:
+            speech += f" ({len(errors)} profiles failed to load)"
+
+        return speech
+
+    except Exception as e:
+        logger.error(f"Failed to preload X feeds: {e}")
+        return f"Failed to pre-load X feeds: {str(e)}"
+
+
+@function_tool(
+    name="schedule_x_feed_preload",
+    description="Start X feed preload in background. JEX will announce when done. Non-blocking."
+)
+async def schedule_x_feed_preload() -> str:
+    """
+    Schedule X feed preload as background task.
+    Returns immediately, task runs asynchronously.
+    """
+    from context_store import get_context_store
+
+    store = get_context_store()
+    profiles = load_x_profiles()
+
+    if not profiles:
+        return "No X search profiles configured. Cannot pre-load."
+
+    profile_names = list(profiles.keys())
+
+    # Create background task
+    task_id = store.create_task('x_feed_preload', params={'profile_names': profile_names})
+
+    logger.info(f"Scheduled X feed preload task: {task_id}")
+
+    return f"Starting preload in background for {len(profile_names)} profiles: {', '.join(profile_names)}. I'll let you know when it's done!"
+
+
+@function_tool(
+    name="check_task_status",
+    description="Check status of a background task by ID"
+)
+async def check_task_status(task_id: str) -> str:
+    """Check if a background task has completed"""
+    from context_store import get_context_store
+
+    store = get_context_store()
+    task = store.get_task_status(task_id)
+
+    if not task:
+        return f"No task found with ID {task_id}"
+
+    status = task['status']
+    task_type = task['task_type']
+
+    if status == 'pending':
+        return f"Task {task_type} is queued and waiting to start."
+    elif status == 'running':
+        return f"Task {task_type} is currently running..."
+    elif status == 'completed':
+        return f"Task {task_type} completed successfully!"
+    elif status == 'failed':
+        error = task.get('error', 'Unknown error')
+        return f"Task {task_type} failed: {error}"
+    else:
+        return f"Task {task_type} has status: {status}"

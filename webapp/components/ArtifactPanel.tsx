@@ -8,6 +8,28 @@ interface Artifact {
   data: any;
 }
 
+interface Thread {
+  authorName: string
+  authorUsername: string
+  likes: string | number
+  matchedKeywords: string[]
+  postText: string
+  replies: string | number
+  reposts: string | number
+  views: string | number
+  engagementScore: number
+  metrics?: {
+    likes?: number
+    replies?: number
+    reposts?: number
+    views?: number
+  }
+}
+
+interface XFeedListProps {
+  threads: Thread[]
+}
+
 export function ArtifactPanel() {
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const [history, setHistory] = useState<Artifact[]>([]);
@@ -84,6 +106,8 @@ function ArtifactRenderer({ artifact }: { artifact: Artifact }) {
       return <CalendarEventList events={artifact.data} />;
     case 'weather':
       return <WeatherWidget data={artifact.data} />;
+    case 'x_feed':
+      return <XFeedList threads={artifact.data} />;
     default:
       return <GenericView data={artifact} />;
   }
@@ -221,4 +245,103 @@ function WeatherWidget({ data }: { data: any }) {
       </div>
     </div>
   );
+}
+
+function XFeedList({ threads }: XFeedListProps) {
+  if (!threads || !Array.isArray(threads) || threads.length === 0) {
+    return (
+      <div className="text-center py-8 text-gray-400">
+        No threads available
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
+        <span>🐦</span>
+        <span>Trending on X</span>
+        <span className="text-sm text-gray-400">({threads.length})</span>
+      </h2>
+
+      {threads.map((thread, index) => (
+        <ThreadCard key={index} thread={thread} rank={index + 1} />
+      ))}
+    </div>
+  )
+}
+
+function ThreadCard({ thread, rank }: { thread: Thread; rank: number }) {
+  const truncatedText = thread.postText.length > 280
+    ? thread.postText.slice(0, 280) + '...'
+    : thread.postText
+
+  return (
+    <div className="bg-gray-50 rounded-lg p-4 border hover:border-blue-300 transition-all">
+      {/* Header: Rank + Author */}
+      <div className="flex items-center gap-3 mb-3">
+        <div className="flex items-center justify-center w-8 h-8 bg-blue-600 text-white rounded-full text-sm font-bold">
+          {rank}
+        </div>
+        <div>
+          <div className="font-semibold text-gray-900">{thread.authorName}</div>
+          <div className="text-sm text-gray-500">{thread.authorUsername}</div>
+        </div>
+      </div>
+
+      {/* Post Text */}
+      <p className="text-gray-800 mb-3 whitespace-pre-wrap leading-relaxed">
+        {truncatedText}
+      </p>
+
+      {/* Matched Keywords */}
+      {thread.matchedKeywords && thread.matchedKeywords.length > 0 && (
+        <div className="flex flex-wrap gap-2 mb-3">
+          {thread.matchedKeywords.filter(k => k).map((keyword, i) => (
+            <span
+              key={i}
+              className="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded-full"
+            >
+              {keyword}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Engagement Metrics */}
+      <div className="flex items-center gap-4 text-sm text-gray-500">
+        <div className="flex items-center gap-1">
+          <span>❤️</span>
+          <span>{formatNumber(thread.likes)}</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span>💬</span>
+          <span>{formatNumber(thread.replies)}</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span>🔁</span>
+          <span>{formatNumber(thread.reposts)}</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span>👁️</span>
+          <span>{formatNumber(thread.views)}</span>
+        </div>
+        {thread.engagementScore && (
+          <div className="ml-auto text-blue-600 font-semibold">
+            {(thread.engagementScore * 100).toFixed(0)}%
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// Utility function to format large numbers
+function formatNumber(num: string | number): string {
+  const n = typeof num === 'string' ? parseFloat(num.replace(/[KM]/g, '')) : num
+  if (isNaN(n)) return String(num)
+
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
+  return n.toString()
 }

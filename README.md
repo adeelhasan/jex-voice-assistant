@@ -8,6 +8,8 @@ A Jarvis-inspired personal voice assistant built with LiveKit, Next.js, and n8n 
 - ✅ **Phase 2: Email Integration** - Gmail integration via n8n with visual artifact panel
 - ✅ **Phase 3: Calendar Integration** - Google Calendar with event display
 - ✅ **Phase 4: Context Management** - SQLite-based memory for follow-up queries
+- ✅ **Phase 5: Weather Integration** - 7-day forecast with intelligent caching and follow-up queries
+- ✅ **Phase 6: X.com Integration & Background Task Management** - Trending content search, proactive pre-loading, and intelligent announcements
 
 ## Features
 
@@ -28,19 +30,27 @@ A Jarvis-inspired personal voice assistant built with LiveKit, Next.js, and n8n 
 - Force refresh with voice: "Refresh my emails"
 - 1-hour TTL with SQLite persistence
 
+### X.com Integration
+- Search for trending and interesting content from X.com (Twitter)
+- Supports multiple search profiles (e.g., AI_Tech, Climate_Tech, Startup_News) or custom keyword searches
+- Intelligent caching of search results for instant follow-up queries
+- Background pre-loading of X feeds for proactive content readiness
+- JEX proactively announces when background pre-loading tasks are complete
+
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                 Web Frontend (Next.js)                      │
-│  ┌─────────────────┐              ┌──────────────────┐     │
-│  │  Voice Interface│              │  Artifact Panel  │     │
-│  │  - Mic controls │              │  - Emails        │     │
-│  │  - State visual │              │  - Calendar      │     │
-│  │  - Audio viz    │              │  - History tabs  │     │
-│  └─────────────────┘              └──────────────────┘     │
-└──────────────────┬──────────────────────────────────────────┘
-                   │ LiveKit WebRTC + Data Channel
+│  ┌─────────────────┐              ┌───────────────────┐    │
+│  │  Voice Interface│              │  Artifact Panel   │    │
+│  │  - Mic controls │              │  - Emails         │    │
+│  │  - State visual │              │  - Calendar       │    │
+│  │  - Audio viz    │              │  - Weather        │    │
+│  └─────────────────┘              │  - X.com Threads  │    │
+└──────────────────┬─────────────────└───────────────────┘    │
+                   │ LiveKit WebRTC + Data Channel (Artifacts)
                    │
 ┌──────────────────▼──────────────────────────────────────────┐
 │             Python Agent (LiveKit Agents)                   │
@@ -50,14 +60,21 @@ A Jarvis-inspired personal voice assistant built with LiveKit, Next.js, and n8n 
 │  └───────────────────────────────────────────────────────┘ │
 │  ┌───────────────────────────────────────────────────────┐ │
 │  │  Function Tools                                        │ │
-│  │  - read_emails()    - read_calendar()                 │ │
-│  │  - recall_context() [memory retrieval]                │ │
+│  │  - read_emails()        - read_calendar()            │ │
+│  │  - get_weather()        - search_x_feed()            │ │
+│  │  - recall_context()     - preload_x_feeds()          │ │
 │  └───────────────────────────────────────────────────────┘ │
 │  ┌───────────────────────────────────────────────────────┐ │
 │  │  Context Store (SQLite)                                │ │
 │  │  - Auto-save fetched data                             │ │
 │  │  - 1-hour TTL, thread-safe                            │ │
 │  │  - Supports scheduled job updates                     │ │
+│  │  - Stores background tasks & announcements            │ │
+│  └───────────────────────────────────────────────────────┘ │
+│  ┌───────────────────────────────────────────────────────┐ │
+│  │  Background Task Processor (asyncio)                  │ │
+│  │  - Executes tasks (e.g., X feed preload)              │ │
+│  │  - Generates proactive announcements                  │ │
 │  └───────────────────────────────────────────────────────┘ │
 └──────────────────┬──────────────────────────────────────────┘
                    │ HTTP Webhooks
@@ -66,6 +83,8 @@ A Jarvis-inspired personal voice assistant built with LiveKit, Next.js, and n8n 
 │                   n8n Workflows                             │
 │  - Gmail API integration (read/filter)                      │
 │  - Google Calendar API (fetch events)                       │
+│  - Weather API (forecasts)                                  │
+│  - X.com (trending content search)                          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -179,6 +198,15 @@ JEX automatically remembers data you've fetched:
 - Data cached for 1 hour with automatic expiration
 - Force refresh anytime: "refresh emails", "update calendar"
 
+### X.com Commands (requires n8n setup and X.com API access)
+- "What's trending?" / "What are people talking about?" *(searches default profile, e.g., AI_Tech)*
+- "What's trending in climate tech?" *(searches specific profile)*
+- "Search X for 'new programming languages'" *(custom keyword search)*
+- "Pre-load all X feeds" *(schedules background task for faster future queries)*
+- "Pre-load all X feeds now" *(blocking call for immediate preload)*
+- "Refresh X feed" *(force-fetches new data for the default profile)*
+
+
 ## Configuration
 
 ### Swapping LLM Providers
@@ -214,10 +242,35 @@ ELEVENLABS_API_KEY=your-key
 
 ### Adjusting Context TTL
 
-Edit `agent/context_store.py`:
-```python
-ContextStore(ttl_seconds=3600)  # 1 hour (default)
-ContextStore(ttl_seconds=7200)  # 2 hours
+The context time-to-live (TTL) is configurable via environment variables in `agent/.env`.
+For example, to set it to 2 hours:
+```bash
+CONTEXT_TTL_SECONDS=7200
+```
+
+### X.com Integration (agent/.env)
+
+```bash
+# Enable X.com functionality
+X_ENABLED=true
+
+# X.com Search Profiles (JSON string)
+# Example for X_SEARCH_PROFILES:
+# [
+#   {"name": "AI_Tech", "keywords": "AI, machine learning, GPT, LLM", "interests": "AI breakthroughs, tech innovation"},
+#   {"name": "Climate_Tech", "keywords": "climate change, green energy, sustainability", "interests": "environmental solutions, clean tech news"},
+#   {"name": "Startup_News", "keywords": "startups, venture capital, entrepreneurship", "interests": "new companies, funding rounds"}
+# ]
+X_SEARCH_PROFILES=[...]
+X_DEFAULT_PROFILE=AI_Tech # Default profile if not specified
+
+# Background Refresh
+X_BACKGROUND_REFRESH_ENABLED=true
+X_REFRESH_INTERVAL_MINUTES=180 # Refresh every 3 hours
+X_INITIAL_DELAY_SECONDS=60   # Initial delay for background refresh on startup
+
+# Auto-preload on agent startup
+X_AUTO_PRELOAD_ON_STARTUP=false # Set to true to preload all profiles when agent starts
 ```
 
 ## Project Structure
@@ -227,8 +280,9 @@ jarivsalexa/
 ├── agent/                     # Python LiveKit agent
 │   ├── main.py               # Agent entrypoint & session management
 │   ├── config.py             # Configurable LLM/STT/TTS providers
-│   ├── tools.py              # Function tools (emails, calendar, recall)
-│   ├── context_store.py      # SQLite-based context memory
+│   ├── tools.py              # Function tools (emails, calendar, weather, X.com, recall)
+│   ├── context_store.py      # SQLite-based context memory, background task storage, and announcements
+│   ├── task_processor.py     # Background task processing loop
 │   ├── requirements.txt      # Python dependencies
 │   └── .env                  # API keys (gitignored)
 │
@@ -240,11 +294,12 @@ jarivsalexa/
 │   │       └── dispatch-agent/ # Manual agent dispatch
 │   ├── components/
 │   │   ├── VoiceAgent.tsx    # Voice interface & agent dispatcher
-│   │   └── ArtifactPanel.tsx # Email/calendar visual display
+│   │   └── ArtifactPanel.tsx # Email/calendar/weather/X.com visual display
 │   └── .env.local            # Frontend config (gitignored)
 │
 └── docs/                      # Project documentation
     └── CLAUDE.md             # Architecture & development guide
+    └── GEMINI.md             # Detailed developer guide (this file)
 ```
 
 ## Troubleshooting
@@ -278,25 +333,60 @@ jarivsalexa/
 - Check `N8N_WEBHOOK_BASE_URL` and `N8N_API_KEY` in `agent/.env`
 - Test webhooks directly with curl to isolate issues
 
+### X.com Integration not working
+
+- Verify `X_ENABLED=true` in `agent/.env`
+- Ensure `X_SEARCH_PROFILES` is correctly formatted JSON in `agent/.env`
+- Check n8n workflows for X.com search are set up and running (endpoint ID should match the one in `agent/tools.py`)
+- Check agent logs for "X feed search timed out" - n8n workflow might be too slow or stuck
+- If using `preload_all_x_feeds`, check agent logs for background task failures
+
+### Background tasks not running or announcements not delivered
+
+- Check `agent/task_processor.py` is running (look for "Task processor started" in agent logs)
+- Check `agent/main.py`'s `entrypoint` for task and announcement poller launch (look for "Task processor launched" and "Announcement poller launched")
+- Verify `agent/context_store.py` is creating `tasks` and `announcements` tables
+- Check agent logs for errors from `task_processor_loop` or `announcement_poller`
+
+
 ## Extending JEX
 
 ### Adding New Data Sources
 
-1. **Create n8n workflow** for your data source (e.g., weather, flights)
+1. **Create n8n workflow** for your data source (e.g., weather, flights, news). The workflow should return a JSON object with `speech` and `artifact` fields.
+   ```json
+   {
+     "speech": "Here is the weather forecast for London...",
+     "artifact": {
+       "type": "weather",
+       "data": { ... weather data ... }
+     }
+   }
+   ```
 2. **Add function tool** in `agent/tools.py`:
    ```python
+   from livekit.agents import function_tool
+   from .context_store import get_context_store
+   from .utils import call_n8n_workflow, send_artifact_to_frontend
+
    @function_tool()
-   async def read_weather(location: str) -> str:
-       result = await call_n8n_workflow("weather", {"location": location})
-       # Auto-store for context
+   async def get_my_weather(location: str) -> str:
+       # Call the n8n webhook with its ID or name
+       result = await call_n8n_workflow("your-weather-workflow-id-or-name", {"location": location})
+
+       # Auto-store for context management and follow-up queries
        store = get_context_store()
-       store.save('weather', result['data'])
+       store.save('weather', result['artifact']['data'], metadata={'location': location})
+
+       # Send the artifact to the frontend for visual display
+       await send_artifact_to_frontend(result['artifact'])
+
        return result['speech']
    ```
-3. **Add artifact renderer** in `webapp/components/ArtifactPanel.tsx`
-4. **Register tool** in `agent/main.py`
+3. **Add artifact renderer** in `webapp/components/ArtifactPanel.tsx` (similar to `XFeedList` or `WeatherWidget`).
+4. **Register tool** in `agent/main.py`.
 
-Context memory automatically works for any new data type!
+Context memory and artifact display automatically work for any new data type!
 
 ## License
 
