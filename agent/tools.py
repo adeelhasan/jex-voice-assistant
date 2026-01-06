@@ -558,10 +558,10 @@ async def search_x_feed(
 
     # 3. Fetch fresh data from n8n
     logger.info(f"Fetching fresh X feed from n8n (keywords: {keywords[:50]}..., interests: {interests[:50]}...)")
-    logger.info("This may take 30-60 seconds for search + ranking...")
+    logger.info("This may take 60-120 seconds for search + ranking...")
 
     try:
-        # Use 90-second timeout for long-running workflow
+        # Use 150-second timeout for long-running workflow (Airtop can be slow)
         result = await asyncio.wait_for(
             call_n8n_workflow(
                 endpoint="9e9e4217-1b52-427c-a3cd-ef14d15bf44f",
@@ -569,9 +569,9 @@ async def search_x_feed(
                     "searchKeywords": keywords,
                     "userInterests": interests
                 },
-                timeout=90.0  # X feed search + ranking takes 30-60s
+                timeout=150.0  # X feed search + ranking can take 90-120s
             ),
-            timeout=90.0
+            timeout=150.0
         )
 
         logger.info(f"n8n response received: {result}")
@@ -592,6 +592,7 @@ async def search_x_feed(
         logger.info(f"Received {len(threads)} threads from n8n")
 
         # 5. Store with profile-specific cache key
+        logger.info(f"💾 Saving {len(threads)} threads to context store with key '{cache_key}'")
         store.save(
             context_type=cache_key,
             data=threads,
@@ -602,7 +603,7 @@ async def search_x_feed(
                 'thread_count': len(threads)
             }
         )
-        logger.info(f"Stored X feed in context with key '{cache_key}'")
+        logger.info(f"✅ Successfully stored X feed in context with key '{cache_key}'")
 
         # 6. Publish artifact to frontend
         await send_artifact_to_frontend({
@@ -620,8 +621,8 @@ async def search_x_feed(
             return speech
 
     except asyncio.TimeoutError:
-        logger.error("X feed search timed out after 90 seconds")
-        return "The X search is taking longer than expected. The n8n workflow might be busy. Please try again in a moment."
+        logger.error("X feed search timed out after 150 seconds")
+        return "The X search is taking longer than expected. The Airtop service might be busy. Please try again in a moment."
 
     except Exception as e:
         logger.error(f"Error fetching X feed: {e}", exc_info=True)
@@ -695,6 +696,7 @@ async def schedule_x_feed_preload() -> str:
     Schedule X feed preload as background task.
     Returns immediately, task runs asynchronously.
     """
+    logger = logging.getLogger(__name__)
     from context_store import get_context_store
 
     store = get_context_store()
@@ -704,6 +706,18 @@ async def schedule_x_feed_preload() -> str:
         return "No X search profiles configured. Cannot pre-load."
 
     profile_names = list(profiles.keys())
+
+    # Check if there's already a pending or running preload task
+    import sqlite3
+    with sqlite3.connect(store.db_path) as conn:
+        existing = conn.execute(
+            "SELECT task_id, status FROM tasks WHERE task_type = 'x_feed_preload' AND status IN ('pending', 'running') ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+
+    if existing:
+        task_id, status = existing
+        logger.info(f"Preload task already {status}: {task_id}")
+        return f"X feed preload is already {status}. I'll announce when it's done!"
 
     # Create background task
     task_id = store.create_task('x_feed_preload', params={'profile_names': profile_names})

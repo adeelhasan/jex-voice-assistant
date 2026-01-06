@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 # Create agent server
 server = AgentServer()
 
+# Global background tasks (server-level, not session-level)
+_global_background_tasks = []
+_background_tasks_started = False
+_current_session = None  # Track the active session for announcements
+
 
 class JexAgent(Agent):
     """
@@ -218,9 +223,10 @@ async def x_feed_background_refresh(last_fetch_times: dict):
         raise
 
 
-async def announcement_poller(session: AgentSession):
-    """Poll for announcements and deliver via voice"""
+async def announcement_poller():
+    """Poll for announcements and deliver via voice using the current active session"""
     from context_store import get_context_store
+    global _current_session
 
     store = get_context_store()
     logger.info("Announcement poller started")
@@ -232,13 +238,19 @@ async def announcement_poller(session: AgentSession):
 
             for ann in announcements:
                 try:
-                    logger.info(f"Announcing: {ann['message']}")
+                    # Get current active session
+                    if _current_session is None:
+                        logger.warning(f"No active session, skipping announcement: {ann['announcement_id']}")
+                        continue
+
+                    logger.info(f"📢 Announcing: {ann['message'][:100]}...")
 
                     # Deliver via voice
-                    await session.say(ann['message'], allow_interruptions=True)
+                    await _current_session.say(ann['message'], allow_interruptions=True)
 
                     # Mark as delivered
                     store.mark_announced(ann['announcement_id'])
+                    logger.info(f"✅ Announcement delivered: {ann['announcement_id']}")
 
                 except Exception as e:
                     logger.error(f"Failed to announce {ann['announcement_id']}: {e}")
@@ -254,6 +266,38 @@ async def announcement_poller(session: AgentSession):
             await asyncio.sleep(10)  # Back off on error
 
 
+async def start_global_background_tasks():
+    """Start background tasks once at server level (not per-session)"""
+    global _global_background_tasks, _background_tasks_started
+
+    if _background_tasks_started:
+        logger.info("Background tasks already started, skipping")
+        return
+
+    logger.info("Starting global background tasks...")
+
+    # Task processor (processes queued tasks)
+    from task_processor import task_processor_loop
+    task_processor = asyncio.create_task(task_processor_loop())
+    _global_background_tasks.append(task_processor)
+    logger.info("✅ Task processor launched (global)")
+
+    # Announcement poller (uses current active session)
+    announce_poller = asyncio.create_task(announcement_poller())
+    _global_background_tasks.append(announce_poller)
+    logger.info("✅ Announcement poller launched (global)")
+
+    # X feed background refresh (if enabled)
+    if os.getenv("X_BACKGROUND_REFRESH_ENABLED", "false").lower() == "true":
+        last_fetch_times = {}
+        x_refresh_task = asyncio.create_task(x_feed_background_refresh(last_fetch_times))
+        _global_background_tasks.append(x_refresh_task)
+        logger.info("✅ X feed background refresh enabled (global)")
+
+    _background_tasks_started = True
+    logger.info(f"✅ {len(_global_background_tasks)} global background tasks started")
+
+
 @server.rtc_session(agent_name="jex")
 async def entrypoint(ctx: JobContext):
     """
@@ -261,6 +305,9 @@ async def entrypoint(ctx: JobContext):
     Sets up the voice pipeline and starts the agent session.
     """
     logger.info(f"Starting JEX agent for room: {ctx.room.name}")
+
+    # Start global background tasks (only once)
+    await start_global_background_tasks()
 
     # Load configurations
     llm_config = get_llm_config()
@@ -273,6 +320,8 @@ async def entrypoint(ctx: JobContext):
 
     # Create voice pipeline components
     try:
+        global _current_session
+
         vad = silero.VAD.load()
         stt = create_stt(stt_config)
         llm = create_llm(llm_config)
@@ -286,45 +335,19 @@ async def entrypoint(ctx: JobContext):
             tts=tts,
         )
 
-        # Shared state for timer reset (per-profile)
-        last_fetch_times = {}  # {profile_name: timestamp}
-
-        # Launch background tasks
-        background_tasks = []
-
-        # NEW: Task processor (independent of session)
-        from task_processor import task_processor_loop
-        task_processor = asyncio.create_task(task_processor_loop())
-        background_tasks.append(task_processor)
-        logger.info("Task processor launched")
-
-        # NEW: Announcement poller (tied to session for voice delivery)
-        announce_poller = asyncio.create_task(announcement_poller(session))
-        background_tasks.append(announce_poller)
-        logger.info("Announcement poller launched")
-
-        # EXISTING: X feed background refresh (if enabled)
-        if os.getenv("X_BACKGROUND_REFRESH_ENABLED", "false").lower() == "true":
-            x_refresh_task = asyncio.create_task(
-                x_feed_background_refresh(last_fetch_times)
-            )
-            background_tasks.append(x_refresh_task)
-            logger.info("X feed background refresh enabled")
+        # Set as current active session for announcements
+        _current_session = session
+        logger.info("✅ Session set as active for announcements")
 
         try:
             # Start agent session (blocking)
             await session.start(agent=JexAgent(), room=ctx.room)
             logger.info("JEX agent session started successfully")
         finally:
-            # Cleanup: cancel background tasks when session ends
-            logger.info("Session ending, canceling background tasks...")
-            for task in background_tasks:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            logger.info("Background tasks canceled")
+            # Cleanup: clear current session
+            logger.info("Session ending, clearing active session...")
+            _current_session = None
+            logger.info("Active session cleared")
 
     except Exception as e:
         logger.error(f"Error starting agent: {e}", exc_info=True)

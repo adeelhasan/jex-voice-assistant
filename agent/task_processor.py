@@ -28,37 +28,59 @@ async def process_task(task: dict):
     task_type = task['task_type']
     params = task.get('params', {}) or {}
 
+    logger.info(f"========================================")
+    logger.info(f"PROCESSING TASK: {task_id}")
+    logger.info(f"Task type: {task_type}")
+    logger.info(f"Parameters: {params}")
+    logger.info(f"========================================")
+
     store = get_context_store()
 
     # Find handler
     handler = TASK_HANDLERS.get(task_type)
     if not handler:
-        logger.error(f"No handler for task type: {task_type}")
+        logger.error(f"❌ No handler for task type: {task_type}")
+        logger.error(f"Available handlers: {list(TASK_HANDLERS.keys())}")
         store.update_task_status(task_id, 'failed', error=f"Unknown task type: {task_type}")
         return
 
+    logger.info(f"✅ Found handler: {handler.__name__}")
+
     # Update status to running
     store.update_task_status(task_id, 'running')
-    logger.info(f"Executing task {task_id} ({task_type})")
+    logger.info(f"⏳ Task status updated to 'running'")
 
     try:
-        # Execute handler
-        result = await handler(**params)
+        # Execute handler with timeout (4 minutes max for X feed searches)
+        logger.info(f"🚀 Calling handler with params: {params}")
+        try:
+            result = await asyncio.wait_for(handler(**params), timeout=240.0)
+            logger.info(f"✅ Handler completed successfully")
+            logger.info(f"Result: {result}")
+        except asyncio.TimeoutError:
+            logger.error(f"⏱️ Handler timed out after 240 seconds")
+            raise Exception("Task execution timed out after 240 seconds")
 
         # Mark as completed
         store.update_task_status(task_id, 'completed', result=result)
-        logger.info(f"Task {task_id} completed successfully")
+        logger.info(f"✅ Task {task_id} marked as completed")
 
         # Generate announcement
         announcement_message = generate_announcement(task_type, result, params)
-        store.create_announcement(task_id, announcement_message, title=f"{task_type} complete")
+        logger.info(f"📢 Generated announcement: {announcement_message[:100]}...")
+        announcement_id = store.create_announcement(task_id, announcement_message, title=f"{task_type} complete")
+        logger.info(f"✅ Created announcement {announcement_id}")
 
     except Exception as e:
-        logger.error(f"Task {task_id} failed: {e}", exc_info=True)
-        store.update_task_status(task_id, 'failed', error=str(e))
+        logger.error(f"❌ Task {task_id} failed with exception: {e}", exc_info=True)
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        store.update_task_status(task_id, 'failed', error=error_msg)
+        logger.info(f"❌ Task status updated to 'failed'")
 
         # Create failure announcement (brief)
-        store.create_announcement(task_id, f"Task failed: {str(e)[:100]}", title="Task failed")
+        failure_msg = f"Task failed: {str(e)[:100]}"
+        store.create_announcement(task_id, failure_msg, title="Task failed")
+        logger.info(f"📢 Created failure announcement")
 
 
 def generate_announcement(task_type: str, result: dict, params: dict) -> str:
@@ -94,7 +116,6 @@ async def task_processor_loop():
     logger.info("Task processor started")
 
     while True:
-        logger.info("Task processor polling for tasks...")
         try:
             # Fetch pending tasks
             pending_tasks = store.get_pending_tasks()
@@ -121,26 +142,50 @@ async def task_processor_loop():
 @register_task_handler('x_feed_preload')
 async def handle_x_feed_preload(profile_names: list = None) -> dict:
     """Handler for X feed preload task"""
-    from tools import preload_all_x_feeds
     import time
+
+    logger.info(f"=== X_FEED_PRELOAD HANDLER STARTED ===")
+    logger.info(f"Profile names parameter: {profile_names}")
+
+    try:
+        from tools import preload_all_x_feeds
+        logger.info("Successfully imported preload_all_x_feeds")
+    except Exception as e:
+        logger.error(f"Failed to import preload_all_x_feeds: {e}", exc_info=True)
+        raise
 
     start_time = time.time()
 
-    # Call the existing preload function
-    speech = await preload_all_x_feeds()
+    logger.info("Calling preload_all_x_feeds()...")
+    try:
+        speech = await preload_all_x_feeds()
+        logger.info(f"preload_all_x_feeds returned: {speech[:200]}")
+    except Exception as e:
+        logger.error(f"preload_all_x_feeds raised exception: {e}", exc_info=True)
+        raise
 
     elapsed = time.time() - start_time
 
     # Parse success from speech (basic approach)
     # Better: Refactor preload_all_x_feeds to return structured data
-    success_count = 3  # Assume success for all 3 profiles
+    total_count = len(profile_names) if profile_names else 2  # Updated to 2 profiles
+    success_count = total_count  # Assume success unless error in speech
+
     if "failed" in speech.lower():
-        # Try to parse number
-        success_count = 2  # Conservative estimate
+        # Try to parse number from speech
+        import re
+        match = re.search(r'(\d+) of (\d+)', speech)
+        if match:
+            success_count = int(match.group(1))
+            total_count = int(match.group(2))
+        else:
+            success_count = total_count - 1  # Conservative estimate
+
+    logger.info(f"Task completed: {success_count}/{total_count} successful, {elapsed:.1f}s elapsed")
 
     return {
         'success_count': success_count,
-        'total_count': 3,
+        'total_count': total_count,
         'elapsed': elapsed,
         'speech': speech
     }
