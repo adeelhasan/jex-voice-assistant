@@ -94,6 +94,7 @@ async def task_processor_loop():
     logger.info("Task processor started")
 
     while True:
+        logger.info("Task processor polling for tasks...")
         try:
             # Fetch pending tasks
             pending_tasks = store.get_pending_tasks()
