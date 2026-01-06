@@ -640,6 +640,7 @@ async def preload_all_x_feeds() -> str:
     Returns:
         Status message with profile names and completion time
     """
+    logger = logging.getLogger(__name__)
     import time
 
     profiles = load_x_profiles()
